@@ -169,6 +169,10 @@ var (
 		Name:  "goerli",
 		Usage: "Görli network: pre-configured proof-of-authority test network",
 	}
+	YoloV1Flag = cli.BoolFlag{
+		Name:  "yolov1",
+		Usage: "YOLOv1 network: pre-configured proof-of-authority shortlived test network.",
+	}
 	RinkebyFlag = cli.BoolFlag{
 		Name:  "rinkeby",
 		Usage: "Rinkeby network: pre-configured proof-of-authority test network",
@@ -228,6 +232,11 @@ var (
 	SnapshotFlag = cli.BoolFlag{
 		Name:  "snapshot",
 		Usage: `Enables snapshot-database mode -- experimental work in progress feature`,
+	}
+	TxLookupLimitFlag = cli.Int64Flag{
+		Name:  "txlookuplimit",
+		Usage: "Number of recent blocks to maintain transactions index by-hash for (default = index all blocks)",
+		Value: 0,
 	}
 	LightKDFFlag = cli.BoolFlag{
 		Name:  "lightkdf",
@@ -595,17 +604,7 @@ var (
 	}
 	BootnodesFlag = cli.StringFlag{
 		Name:  "bootnodes",
-		Usage: "Comma separated enode URLs for P2P discovery bootstrap (set v4+v5 instead for light servers)",
-		Value: "",
-	}
-	BootnodesV4Flag = cli.StringFlag{
-		Name:  "bootnodesv4",
-		Usage: "Comma separated enode URLs for P2P v4 discovery bootstrap (light server, full nodes)",
-		Value: "",
-	}
-	BootnodesV5Flag = cli.StringFlag{
-		Name:  "bootnodesv5",
-		Usage: "Comma separated enode URLs for P2P v5 discovery bootstrap (light server, light nodes)",
+		Usage: "Comma separated enode URLs for P2P discovery bootstrap",
 		Value: "",
 	}
 	NodeKeyFileFlag = cli.StringFlag{
@@ -749,6 +748,9 @@ func MakeDataDir(ctx *cli.Context) string {
 		if ctx.GlobalBool(GoerliFlag.Name) {
 			return filepath.Join(path, "goerli")
 		}
+		if ctx.GlobalBool(YoloV1Flag.Name) {
+			return filepath.Join(path, "yolo-v1")
+		}
 		return path
 	}
 	Fatalf("Cannot determine default data directory, please set manually (--datadir)")
@@ -793,9 +795,9 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
 	urls := params.MainnetBootnodes
 	switch {
-	case ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(BootnodesV4Flag.Name):
-		if ctx.GlobalIsSet(BootnodesV4Flag.Name) {
-			urls = splitAndTrim(ctx.GlobalString(BootnodesV4Flag.Name))
+	case ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(LegacyBootnodesV4Flag.Name):
+		if ctx.GlobalIsSet(LegacyBootnodesV4Flag.Name) {
+			urls = splitAndTrim(ctx.GlobalString(LegacyBootnodesV4Flag.Name))
 		} else {
 			urls = splitAndTrim(ctx.GlobalString(BootnodesFlag.Name))
 		}
@@ -805,6 +807,8 @@ func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
 		urls = params.RinkebyBootnodes
 	case ctx.GlobalBool(GoerliFlag.Name):
 		urls = params.GoerliBootnodes
+	case ctx.GlobalBool(YoloV1Flag.Name):
+		urls = params.YoloV1Bootnodes
 	case cfg.BootstrapNodes != nil:
 		return // already set, don't apply defaults.
 	}
@@ -825,18 +829,22 @@ func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
 // setBootstrapNodesV5 creates a list of bootstrap nodes from the command line
 // flags, reverting to pre-configured ones if none have been specified.
 func setBootstrapNodesV5(ctx *cli.Context, cfg *p2p.Config) {
-	urls := params.DiscoveryV5Bootnodes
+	urls := params.MainnetBootnodes
 	switch {
-	case ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(BootnodesV5Flag.Name):
-		if ctx.GlobalIsSet(BootnodesV5Flag.Name) {
-			urls = splitAndTrim(ctx.GlobalString(BootnodesV5Flag.Name))
+	case ctx.GlobalIsSet(BootnodesFlag.Name) || ctx.GlobalIsSet(LegacyBootnodesV5Flag.Name):
+		if ctx.GlobalIsSet(LegacyBootnodesV5Flag.Name) {
+			urls = splitAndTrim(ctx.GlobalString(LegacyBootnodesV5Flag.Name))
 		} else {
 			urls = splitAndTrim(ctx.GlobalString(BootnodesFlag.Name))
 		}
+	case ctx.GlobalBool(RopstenFlag.Name):
+		urls = params.RopstenBootnodes
 	case ctx.GlobalBool(RinkebyFlag.Name):
 		urls = params.RinkebyBootnodes
 	case ctx.GlobalBool(GoerliFlag.Name):
 		urls = params.GoerliBootnodes
+	case ctx.GlobalBool(YoloV1Flag.Name):
+		urls = params.YoloV1Bootnodes
 	case cfg.BootstrapNodesV5 != nil:
 		return // already set, don't apply defaults.
 	}
@@ -1267,6 +1275,8 @@ func setDataDir(ctx *cli.Context, cfg *node.Config) {
 		cfg.DataDir = filepath.Join(node.DefaultDataDir(), "rinkeby")
 	case ctx.GlobalBool(GoerliFlag.Name) && cfg.DataDir == node.DefaultDataDir():
 		cfg.DataDir = filepath.Join(node.DefaultDataDir(), "goerli")
+	case ctx.GlobalBool(YoloV1Flag.Name) && cfg.DataDir == node.DefaultDataDir():
+		cfg.DataDir = filepath.Join(node.DefaultDataDir(), "yolo-v1")
 	}
 }
 
@@ -1474,10 +1484,14 @@ func SetShhConfig(ctx *cli.Context, stack *node.Node, cfg *whisper.Config) {
 // SetEthConfig applies eth-related command line flags to the config.
 func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	// Avoid conflicting network flags
-	CheckExclusive(ctx, DeveloperFlag, LegacyTestnetFlag, RopstenFlag, RinkebyFlag, GoerliFlag)
+	CheckExclusive(ctx, DeveloperFlag, LegacyTestnetFlag, RopstenFlag, RinkebyFlag, GoerliFlag, YoloV1Flag)
 	CheckExclusive(ctx, LegacyLightServFlag, LightServeFlag, SyncModeFlag, "light")
 	CheckExclusive(ctx, DeveloperFlag, ExternalSignerFlag) // Can't use both ephemeral unlocked and external signer
-
+	CheckExclusive(ctx, GCModeFlag, "archive", TxLookupLimitFlag)
+	// todo(rjl493456442) make it available for les server
+	// Ancient tx indices pruning is not available for les server now
+	// since light client relies on the server for transaction status query.
+	CheckExclusive(ctx, LegacyLightServFlag, LightServeFlag, TxLookupLimitFlag)
 	var ks *keystore.KeyStore
 	if keystores := stack.AccountManager().Backends(keystore.KeyStoreType); len(keystores) > 0 {
 		ks = keystores[0].(*keystore.KeyStore)
@@ -1512,6 +1526,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	}
 	if ctx.GlobalIsSet(CacheNoPrefetchFlag.Name) {
 		cfg.NoPrefetch = ctx.GlobalBool(CacheNoPrefetchFlag.Name)
+	}
+	if ctx.GlobalIsSet(TxLookupLimitFlag.Name) {
+		cfg.TxLookupLimit = ctx.GlobalUint64(TxLookupLimitFlag.Name)
 	}
 	if ctx.GlobalIsSet(CacheFlag.Name) || ctx.GlobalIsSet(CacheTrieFlag.Name) {
 		cfg.TrieCleanCache = ctx.GlobalInt(CacheFlag.Name) * ctx.GlobalInt(CacheTrieFlag.Name) / 100
@@ -1559,19 +1576,24 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 			cfg.NetworkId = 3
 		}
 		cfg.Genesis = core.DefaultRopstenGenesisBlock()
-		setDNSDiscoveryDefaults(cfg, params.KnownDNSNetworks[params.RopstenGenesisHash])
+		setDNSDiscoveryDefaults(cfg, params.RopstenGenesisHash)
 	case ctx.GlobalBool(RinkebyFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
 			cfg.NetworkId = 4
 		}
 		cfg.Genesis = core.DefaultRinkebyGenesisBlock()
-		setDNSDiscoveryDefaults(cfg, params.KnownDNSNetworks[params.RinkebyGenesisHash])
+		setDNSDiscoveryDefaults(cfg, params.RinkebyGenesisHash)
 	case ctx.GlobalBool(GoerliFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
 			cfg.NetworkId = 5
 		}
 		cfg.Genesis = core.DefaultGoerliGenesisBlock()
-		setDNSDiscoveryDefaults(cfg, params.KnownDNSNetworks[params.GoerliGenesisHash])
+		setDNSDiscoveryDefaults(cfg, params.GoerliGenesisHash)
+	case ctx.GlobalBool(YoloV1Flag.Name):
+		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
+			cfg.NetworkId = 133519467574833 // "yolov1"
+		}
+		cfg.Genesis = core.DefaultYoloV1GenesisBlock()
 	case ctx.GlobalBool(DeveloperFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
 			cfg.NetworkId = 1337
@@ -1600,18 +1622,25 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 		}
 	default:
 		if cfg.NetworkId == 1 {
-			setDNSDiscoveryDefaults(cfg, params.KnownDNSNetworks[params.MainnetGenesisHash])
+			setDNSDiscoveryDefaults(cfg, params.MainnetGenesisHash)
 		}
 	}
 }
 
 // setDNSDiscoveryDefaults configures DNS discovery with the given URL if
 // no URLs are set.
-func setDNSDiscoveryDefaults(cfg *eth.Config, url string) {
+func setDNSDiscoveryDefaults(cfg *eth.Config, genesis common.Hash) {
 	if cfg.DiscoveryURLs != nil {
-		return
+		return // already set through flags/config
 	}
-	cfg.DiscoveryURLs = []string{url}
+
+	protocol := "all"
+	if cfg.SyncMode == downloader.LightSync {
+		protocol = "les"
+	}
+	if url := params.KnownDNSNetwork(genesis, protocol); url != "" {
+		cfg.DiscoveryURLs = []string{url}
+	}
 }
 
 // RegisterEthService adds an Ethereum client to the stack.
@@ -1747,6 +1776,8 @@ func MakeGenesis(ctx *cli.Context) *core.Genesis {
 		genesis = core.DefaultRinkebyGenesisBlock()
 	case ctx.GlobalBool(GoerliFlag.Name):
 		genesis = core.DefaultGoerliGenesisBlock()
+	case ctx.GlobalBool(YoloV1Flag.Name):
+		genesis = core.DefaultYoloV1GenesisBlock()
 	case ctx.GlobalBool(DeveloperFlag.Name):
 		Fatalf("Developer chains are ephemeral")
 	}
@@ -1754,7 +1785,7 @@ func MakeGenesis(ctx *cli.Context) *core.Genesis {
 }
 
 // MakeChain creates a chain manager from set command line flags.
-func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chainDb ethdb.Database) {
+func MakeChain(ctx *cli.Context, stack *node.Node, readOnly bool) (chain *core.BlockChain, chainDb ethdb.Database) {
 	var err error
 	chainDb = MakeChainDatabase(ctx, stack)
 	config, _, err := core.SetupGenesisBlock(chainDb, MakeGenesis(ctx))
@@ -1800,7 +1831,12 @@ func MakeChain(ctx *cli.Context, stack *node.Node) (chain *core.BlockChain, chai
 		cache.TrieDirtyLimit = ctx.GlobalInt(CacheFlag.Name) * ctx.GlobalInt(CacheGCFlag.Name) / 100
 	}
 	vmcfg := vm.Config{EnablePreimageRecording: ctx.GlobalBool(VMEnableDebugFlag.Name)}
-	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil)
+	var limit *uint64
+	if ctx.GlobalIsSet(TxLookupLimitFlag.Name) && !readOnly {
+		l := ctx.GlobalUint64(TxLookupLimitFlag.Name)
+		limit = &l
+	}
+	chain, err = core.NewBlockChain(chainDb, cache, config, engine, vmcfg, nil, limit)
 	if err != nil {
 		Fatalf("Can't create BlockChain: %v", err)
 	}

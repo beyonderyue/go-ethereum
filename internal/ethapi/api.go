@@ -287,7 +287,7 @@ func (s *PrivateAccountAPI) NewAccount(password string) (common.Address, error) 
 	return common.Address{}, err
 }
 
-// fetchKeystore retrives the encrypted keystore from the account manager.
+// fetchKeystore retrieves the encrypted keystore from the account manager.
 func fetchKeystore(am *accounts.Manager) *keystore.KeyStore {
 	return am.Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
 }
@@ -864,6 +864,36 @@ func DoCall(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.Blo
 	return result, err
 }
 
+func newRevertError(result *core.ExecutionResult) *revertError {
+	reason, errUnpack := abi.UnpackRevert(result.Revert())
+	err := errors.New("execution reverted")
+	if errUnpack == nil {
+		err = fmt.Errorf("execution reverted: %v", reason)
+	}
+	return &revertError{
+		error:  err,
+		reason: hexutil.Encode(result.Revert()),
+	}
+}
+
+// revertError is an API error that encompassas an EVM revertal with JSON error
+// code and a binary data blob.
+type revertError struct {
+	error
+	reason string // revert reason hex encoded
+}
+
+// ErrorCode returns the JSON error code for a revertal.
+// See: https://github.com/ethereum/wiki/wiki/JSON-RPC-Error-Codes-Improvement-Proposal
+func (e *revertError) ErrorCode() int {
+	return 3
+}
+
+// ErrorData returns the hex encoded revert reason.
+func (e *revertError) ErrorData() interface{} {
+	return e.reason
+}
+
 // Call executes the given transaction on the state for the given block number.
 //
 // Additionally, the caller can specify a batch of contract for fields overriding.
@@ -879,24 +909,11 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNrOr
 	if err != nil {
 		return nil, err
 	}
-	return result.Return(), nil
-}
-
-type estimateGasError struct {
-	error  string // Concrete error type if it's failed to estimate gas usage
-	vmerr  error  // Additional field, it's non-nil if the given transaction is invalid
-	revert string // Additional field, it's non-empty if the transaction is reverted and reason is provided
-}
-
-func (e estimateGasError) Error() string {
-	errMsg := e.error
-	if e.vmerr != nil {
-		errMsg += fmt.Sprintf(" (%v)", e.vmerr)
+	// If the result contains a revert reason, try to unpack and return it.
+	if len(result.Revert()) > 0 {
+		return nil, newRevertError(result)
 	}
-	if e.revert != "" {
-		errMsg += fmt.Sprintf(" (%s)", e.revert)
-	}
-	return errMsg
+	return result.Return(), result.Err
 }
 
 func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap *big.Int) (hexutil.Uint64, error) {
@@ -906,6 +923,11 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 		hi  uint64
 		cap uint64
 	)
+	// Use zero address if sender unspecified.
+	if args.From == nil {
+		args.From = new(common.Address)
+	}
+	// Determine the highest gas limit can be used during the estimation.
 	if args.Gas != nil && uint64(*args.Gas) >= params.TxGas {
 		hi = uint64(*args.Gas)
 	} else {
@@ -916,16 +938,38 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 		}
 		hi = block.GasLimit()
 	}
+	// Recap the highest gas limit with account's available balance.
+	if args.GasPrice != nil && args.GasPrice.ToInt().Uint64() != 0 {
+		state, _, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+		if err != nil {
+			return 0, err
+		}
+		balance := state.GetBalance(*args.From) // from can't be nil
+		available := new(big.Int).Set(balance)
+		if args.Value != nil {
+			if args.Value.ToInt().Cmp(available) >= 0 {
+				return 0, errors.New("insufficient funds for transfer")
+			}
+			available.Sub(available, args.Value.ToInt())
+		}
+		allowance := new(big.Int).Div(available, args.GasPrice.ToInt())
+		if hi > allowance.Uint64() {
+			transfer := args.Value
+			if transfer == nil {
+				transfer = new(hexutil.Big)
+			}
+			log.Warn("Gas estimation capped by limited funds", "original", hi, "balance", balance,
+				"sent", transfer.ToInt(), "gasprice", args.GasPrice.ToInt(), "fundable", allowance)
+			hi = allowance.Uint64()
+		}
+	}
+	// Recap the highest gas allowance with specified gascap.
 	if gasCap != nil && hi > gasCap.Uint64() {
 		log.Warn("Caller gas above allowance, capping", "requested", hi, "cap", gasCap)
 		hi = gasCap.Uint64()
 	}
 	cap = hi
 
-	// Use zero address if sender unspecified.
-	if args.From == nil {
-		args.From = new(common.Address)
-	}
 	// Create a helper to check if a gas allowance results in an executable transaction
 	executable := func(gas uint64) (bool, *core.ExecutionResult, error) {
 		args.Gas = (*hexutil.Uint64)(&gas)
@@ -964,23 +1008,13 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 		}
 		if failed {
 			if result != nil && result.Err != vm.ErrOutOfGas {
-				var revert string
 				if len(result.Revert()) > 0 {
-					ret, err := abi.UnpackRevert(result.Revert())
-					if err != nil {
-						revert = hexutil.Encode(result.Revert())
-					} else {
-						revert = ret
-					}
+					return 0, newRevertError(result)
 				}
-				return 0, estimateGasError{
-					error:  "always failing transaction",
-					vmerr:  result.Err,
-					revert: revert,
-				}
+				return 0, result.Err
 			}
 			// Otherwise, the specified gas cap is too low
-			return 0, estimateGasError{error: fmt.Sprintf("gas required exceeds allowance (%d)", cap)}
+			return 0, fmt.Errorf("gas required exceeds allowance (%d)", cap)
 		}
 	}
 	return hexutil.Uint64(hi), nil

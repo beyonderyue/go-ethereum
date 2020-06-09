@@ -18,7 +18,6 @@
 package state
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -289,20 +288,10 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
 	stateObject := s.getStateObject(addr)
-	if stateObject == nil {
-		return 0
+	if stateObject != nil {
+		return stateObject.CodeSize(s.db)
 	}
-	if stateObject.code != nil {
-		return len(stateObject.code)
-	}
-	if bytes.Equal(stateObject.CodeHash(), emptyCode[:]) {
-		return 0
-	}
-	size, err := s.db.ContractCodeSize(stateObject.addrHash, common.BytesToHash(stateObject.CodeHash()))
-	if err != nil {
-		s.setError(fmt.Errorf("GetCodeSize (%x) error: %v", addr[:], err))
-	}
-	return size
+	return 0
 }
 
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
@@ -524,7 +513,7 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 			defer func(start time.Time) { s.SnapshotAccountReads += time.Since(start) }(time.Now())
 		}
 		var acc *snapshot.Account
-		if acc, err = s.snap.Account(crypto.Keccak256Hash(addr[:])); err == nil {
+		if acc, err = s.snap.Account(crypto.Keccak256Hash(addr.Bytes())); err == nil {
 			if acc == nil {
 				return nil
 			}
@@ -543,9 +532,9 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 		if metrics.EnabledExpensive {
 			defer func(start time.Time) { s.AccountReads += time.Since(start) }(time.Now())
 		}
-		enc, err := s.trie.TryGet(addr[:])
+		enc, err := s.trie.TryGet(addr.Bytes())
 		if err != nil {
-			s.setError(fmt.Errorf("getDeleteStateObject (%x) error: %v", addr[:], err))
+			s.setError(fmt.Errorf("getDeleteStateObject (%x) error: %v", addr.Bytes(), err))
 			return nil
 		}
 		if len(enc) == 0 {
